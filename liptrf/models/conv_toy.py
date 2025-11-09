@@ -49,4 +49,4 @@ class Net(nn.Module):
         v6 = norm(self.fc6.weight, ord=2)
         v7 = norm(self.fc7.weight, ord=2)
 
-        return v1 * v2 * v3 * v4 * v4 * v5 * v6 * v7
+        return v1 * v2 * v3 * v4 * v5 * v6 * v7

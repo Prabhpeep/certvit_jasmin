@@ -16,75 +16,233 @@ from liptrf.models.vit import ViT
 from liptrf.utils.evaluate import evaluate_pgd
 
 
+# def train(args, model, device, train_loader,
+#           optimizer, epoch, criterion, finetune=False):
+#     model.train()
+#     train_loss = 0
+#     correct = 0
+#     total_jasmin=0
+
+#     for batch_idx, (data, target) in enumerate(train_loader):
+#         data, target = data.to(device), target.to(device)
+#         optimizer.zero_grad()
+#         output = model(data)
+#         loss = criterion(output, target)
+#                 # If model has JaSMin regularizer, add it
+#         if hasattr(model, "jasmin_loss"):
+#             jasmin_val = model.jasmin_loss()   # compute JaSMin
+#             loss = loss + args.lmbda * jasmin_val
+#             total_jasmin += jasmin_val.item()  # accumulate JaSMin
+
+    
+#         loss.backward()
+#         train_loss += loss.item()
+#         pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log_probability
+#         correct += pred.eq(target.view_as(pred)).sum().item()
+#         optimizer.step()
+
+#         with torch.no_grad():
+#             if args.relax and epoch > args.warmup:
+#                 model.lipschitz()
+#                 model.apply_spec()
+#         torch.cuda.empty_cache()
+
+#     train_loss /= len(train_loader.dataset)
+#     train_samples = len(train_loader.dataset)
+#         # Averages
+    
+#     avg_jasmin = total_jasmin / len(train_loader.dataset)
+    
+
+#     print(f"Epoch: {epoch}, Train set: Average loss: {train_loss:.4f}, "
+#           f"Accuracy: {correct}/{train_samples} "
+#           f"({100.*correct/train_samples:.0f}%), "
+#           f"Error: {(train_samples-correct)/train_samples * 100:.2f}%, "
+#           f"JaSMin: {avg_jasmin:.4f}")
+
+# def test(args, model, device, test_loader, criterion):
+#     model.eval()
+#     test_loss = 0
+#     correct = 0
+    
+#     lip = model.lipschitz()
+#     verified = 0
+
+#     # with torch.no_grad():
+#     for data, target in test_loader:
+#         data, target = data.to(device), target.to(device)
+#         output = model.forward(data)
+        
+#         test_loss += criterion(output, target).item()  # sum up batch loss
+#         pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log_probability
+#         correct += pred.eq(target.view_as(pred)).sum().item()
+
+#         # print (output.max())
+#         one_hot = F.one_hot(target, num_classes=output.shape[-1])
+#         worst_logit = output + 2**0.5 * 36/255 * lip * (1 - one_hot)
+#         worst_pred = worst_logit.argmax(dim=1, keepdim=True)
+#         verified += worst_pred.eq(target.view_as(worst_pred)).sum().item()
+
+#         torch.cuda.empty_cache()
+
+#     test_samples = len(test_loader.dataset)
+
+#     test_loss /= len(test_loader.dataset)
+#     test_samples = len(test_loader.dataset)
+    
+#     print(f"Test set: Average loss: {test_loss:.4f}, " +
+#           f"Accuracy: {correct}/{test_samples} " + 
+#           f"({100.*correct/test_samples:.2f}%), " +
+#           f"Verified: {100.*verified/test_samples:.2f}%, " +
+#           f"Error: {(test_samples-correct)/test_samples * 100:.2f}% " +
+#           f"Lipschitz {lip:4f}")
+    
+#     return 100.*correct/test_samples, 100.*verified/test_samples, lip
+
+
 def train(args, model, device, train_loader,
           optimizer, epoch, criterion, finetune=False):
     model.train()
-    train_loss = 0
+    train_loss = 0.0
     correct = 0
+    total_jasmin = 0.0
+
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         output = model(data)
         loss = criterion(output, target)
+
+        # --- Safely add JaSMin only when its weight (lmbda) != 0 ---
+        if args.lmbda != 0 and hasattr(model, "jasmin_loss"):
+            try:
+                jasmin_val = model.jasmin_loss()
+                # convert to tensor if necessary
+                if not torch.is_tensor(jasmin_val):
+                    jasmin_val = torch.tensor(float(jasmin_val), device=loss.device, dtype=loss.dtype)
+
+                # Guard against non-finite jasmin values
+                if not torch.isfinite(jasmin_val).all():
+                    print(f"[WARN] jasmin_loss returned non-finite ({jasmin_val}); skipping JaSMin term for this batch.")
+                    jasmin_val = torch.tensor(0.0, device=loss.device, dtype=loss.dtype)
+
+            except Exception as e:
+                print(f"[WARN] jasmin_loss() raised exception: {e}; skipping JaSMin term for this batch.")
+                jasmin_val = torch.tensor(0.0, device=loss.device, dtype=loss.dtype)
+
+            loss = loss + args.lmbda * jasmin_val
+            # accumulate as float safely
+            try:
+                total_jasmin += float(jasmin_val.detach().cpu().item())
+            except Exception:
+                # fallback: ignore accumulation if something odd happens
+                pass
+
+        # check loss before backward
+        if not torch.isfinite(loss).all():
+            print(f"[ERROR] Non-finite loss detected at epoch {epoch}, batch {batch_idx}. Skipping this batch.")
+            # skip optimizer step and continue (or you can break)
+            continue
+
         loss.backward()
-        train_loss += loss.item()
-        pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log_probability
-        correct += pred.eq(target.view_as(pred)).sum().item()
+
+        # Optional: gradient clipping to prevent exploding grads (uncomment to enable)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         optimizer.step()
 
+        # After step, optionally apply Lipschitz projection if relax is enabled and warmup passed
         with torch.no_grad():
             if args.relax and epoch > args.warmup:
-                model.lipschitz()
-                model.apply_spec()
-        torch.cuda.empty_cache()
+                try:
+                    model.lipschitz()
+                    model.apply_spec()
+                except Exception as e:
+                    print(f"[WARN] model.lipschitz()/apply_spec() failed: {e}")
 
+        train_loss += float(loss.detach().cpu().item())
+        pred = output.argmax(dim=1, keepdim=True)
+        correct += int(pred.eq(target.view_as(pred)).sum().item())
+
+        # free cuda cache if using GPU
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    # compute averages over dataset size (keep previous behaviour)
     train_loss /= len(train_loader.dataset)
     train_samples = len(train_loader.dataset)
+    avg_jasmin = total_jasmin / len(train_loader.dataset)
 
-    print(f"Epoch: {epoch}, Train set: Average loss: {train_loss:.4f}, " +
-          f"Accuracy: {correct}/{train_samples} " +
-          f"({100.*correct/train_samples:.0f}%), " +
-          f"Error: {(train_samples-correct)/train_samples * 100:.2f}%")
+    print(f"Epoch: {epoch}, Train set: Average loss: {train_loss:.4f}, "
+          f"Accuracy: {correct}/{train_samples} "
+          f"({100.*correct/train_samples:.0f}%), "
+          f"Error: {(train_samples-correct)/train_samples * 100:.2f}%, "
+          f"JaSMin: {avg_jasmin:.4f}")
 
 
 def test(args, model, device, test_loader, criterion):
     model.eval()
-    test_loss = 0
+    test_loss = 0.0
     correct = 0
-    
-    lip = model.lipschitz()
+
+    # compute Lipschitz but guard invalid return
+    try:
+        lip = model.lipschitz()
+        # if lip is nan or not finite, set to 0.0
+        if isinstance(lip, float):
+            if not (lip == lip):  # nan check
+                lip = 0.0
+        elif torch.is_tensor(lip):
+            if not torch.isfinite(lip).all():
+                lip = 0.0
+            else:
+                lip = float(lip)
+        else:
+            # fallback
+            lip = float(lip) if lip is not None else 0.0
+    except Exception as e:
+        print(f"[WARN] model.lipschitz() raised: {e}; using lip=0.0")
+        lip = 0.0
+
     verified = 0
 
-    # with torch.no_grad():
     for data, target in test_loader:
         data, target = data.to(device), target.to(device)
         output = model.forward(data)
-        
-        test_loss += criterion(output, target).item()  # sum up batch loss
-        pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log_probability
-        correct += pred.eq(target.view_as(pred)).sum().item()
 
-        # print (output.max())
+        # guard output
+        if not torch.isfinite(output).all():
+            print("[WARN] Non-finite outputs in test forward; skipping batch.")
+            continue
+
+        test_loss += float(criterion(output, target).item())
+        pred = output.argmax(dim=1, keepdim=True)
+        correct += int(pred.eq(target.view_as(pred)).sum().item())
+
         one_hot = F.one_hot(target, num_classes=output.shape[-1])
-        worst_logit = output + 2**0.5 * 36/255 * lip * (1 - one_hot)
+        worst_logit = output + (2**0.5) * (36/255) * lip * (1 - one_hot)
         worst_pred = worst_logit.argmax(dim=1, keepdim=True)
-        verified += worst_pred.eq(target.view_as(worst_pred)).sum().item()
+        verified += int(worst_pred.eq(target.view_as(worst_pred)).sum().item())
 
-        torch.cuda.empty_cache()
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
 
     test_samples = len(test_loader.dataset)
+    test_loss /= test_samples
 
-    test_loss /= len(test_loader.dataset)
-    test_samples = len(test_loader.dataset)
-    
     print(f"Test set: Average loss: {test_loss:.4f}, " +
-          f"Accuracy: {correct}/{test_samples} " + 
+          f"Accuracy: {correct}/{test_samples} " +
           f"({100.*correct/test_samples:.2f}%), " +
           f"Verified: {100.*verified/test_samples:.2f}%, " +
           f"Error: {(test_samples-correct)/test_samples * 100:.2f}% " +
           f"Lipschitz {lip:4f}")
-    
+
     return 100.*correct/test_samples, 100.*verified/test_samples, lip
+
 
 
 def main():
@@ -124,11 +282,15 @@ def main():
                         help='data path of CIFAR10')
     parser.add_argument('--weight_path', type=str, required=True,
                         help='weight path of CIFAR10')
+    parser.add_argument('--jasmin_lambda', type=float, default=1e-3,
+                    help='Weight of JaSMin regularization term')
 
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
-    device = torch.device(args.gpu)
+    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
 
     print('==> Preparing data..')
     transform_train = transforms.Compose([

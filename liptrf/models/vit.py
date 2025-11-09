@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.special import lambertw 
 from scipy.stats import truncnorm 
+import math
 
 import torch
 from torch import nn
@@ -15,6 +16,21 @@ from liptrf.models.layers.linear import LinearX
 
 def pair(t):
     return t if isinstance(t, tuple) else (t, t)
+# --- JaSMin helper (softmax jacobian norm) ---
+def softmax_jacobian_norm_from_attn(attn):
+    """
+    attn: (..., seq_len, seq_len) softmax outputs (probabilities).
+    Returns per-head/per-batch scalar norm (average across tokens & batch).
+    Uses analytic form sqrt(a_max * (1 - a_max)) per row/head then average.
+    """
+    # attn shape: (B, H, N, N) or (..., N, N)
+    # compute max along last dim (the softmax output per query position)
+    a_max, _ = attn.max(dim=-1)                # shape (..., N)
+    a_max = torch.clamp(a_max, 0.0, 1.0)
+    # now a_max in [0,1]; compute sqrt(a_max*(1-a_max)) per token
+    per_token = torch.sqrt(a_max * (1.0 - a_max) + 1e-12)  # stability
+    # average across tokens, heads, batch
+    return per_token.mean()
 
 
 class PreNorm(nn.Module):
@@ -121,12 +137,35 @@ class L2Attention(nn.Module):
         q_l2 = torch.matmul(q_l2, torch.ones(q_l2.shape).transpose(-1, -2).type_as(x))
         k_l2 = torch.matmul(torch.ones(k_l2.shape).type_as(x), k_l2.transpose(-1, -2))
         
-        attn = (-1 * (q_l2 - 2 * dots + k_l2) * self.scale).softmax(dim=-1)
+        # old code
+        # attn = (-1 * (q_l2 - 2 * dots + k_l2) * self.scale).softmax(dim=-1)
+
+        #new code
+        logits = -1 * (q_l2 - 2 * dots + k_l2) * self.scale
+        logits = logits - logits.max(dim=-1, keepdim=True).values   # <-- subtract max per row for stability
+        attn = logits.softmax(dim=-1)
         attn = self.dropout(attn)
-        
+
+        attn = self.dropout(attn)
+
+        # compute JaSMin reg for this attention: analytic softmax jacobian norm
+        # attn shape: (b, h, n, n)
+        try:
+            jasmin_reg = softmax_jacobian_norm_from_attn(attn)
+        except Exception:
+            # fallback safe value
+            jasmin_reg = torch.tensor(0.0, device=attn.device)
+
+        # store for training loop (will be overwritten each forward)
+        self.last_jasmin = jasmin_reg.detach()  # detach to avoid double graph retention
+
         out = torch.matmul(attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
-        return self.dropout(self.to_out(out))
+        out = self.dropout(self.to_out(out))
+
+        # return output as usual
+        return out
+
 
     def lipschitz(self):
         N = self.n_value 
@@ -182,9 +221,19 @@ class Attention(nn.Module):
         attn = self.attend(dots)
         attn = self.dropout(attn)
 
+        # JaSMin regularizer
+        try:
+            jasmin_reg = softmax_jacobian_norm_from_attn(attn)
+        except Exception:
+            jasmin_reg = torch.tensor(0.0, device=attn.device)
+        self.last_jasmin = jasmin_reg               # keep graph — participates in training
+        self.last_jasmin_logged = jasmin_reg.detach()  
+
         out = torch.matmul(attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
-        return self.dropout(self.to_out(out))
+        out = self.dropout(self.to_out(out))
+        return out
+
 
     def lipschitz(self):
         return float('nan')
@@ -309,12 +358,37 @@ class ViT(nn.Module):
         x = self.to_latent(x)
         x = self.mlp_ln(x)
         return self.mlp_head(x)
+    
+    def jasmin_loss(self):
+        loss = 0.0
+        for module in self.modules():
+            if hasattr(module, 'last_jasmin'):
+                loss += module.last_jasmin
+        return loss
+
 
     def lipschitz(self):
-        v1 = self.to_patch_embedding.lipschitz()
-        v2 = self.transformer.lipschitz()
-        v3 = self.mlp_head.lipschitz()
-        return v1 * v2 * v3
+        vals = []
+        for name, module in [
+            ("to_patch_embedding", self.to_patch_embedding),
+            ("transformer", self.transformer),
+            ("mlp_head", self.mlp_head),
+        ]:
+            try:
+                v = module.lipschitz()
+                if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
+                    print(f"[WARN Lipschitz] {name} returned invalid value: {v}")
+                    v = 1.0  # neutral element for product
+            except Exception as e:
+                print(f"[ERROR Lipschitz] Failed on {name}: {e}")
+                v = 1.0
+            vals.append(v)
+
+        total = np.prod(vals)
+        if np.isnan(total) or np.isinf(total):
+            total = 0.0
+        return total
+
 
     def apply_spec(self):
         self.to_patch_embedding.apply_spec()

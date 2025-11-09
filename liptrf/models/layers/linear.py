@@ -31,10 +31,19 @@ class LinearX(nn.Module):
         self.prox_done = False 
         self.proj_done = False
         self.relu_after = relu_after
-        # print (self.power_iter)
+        self.last_sigma = None
 
-        nn.init.orthogonal_(self.weight)
+        # --- stable truncated normal initialization ---
+        fan_in, fan_out = input, output
+        std = (2.0 / (fan_in + fan_out)) ** 0.5
+        a, b = -2.0, 2.0
+        w_init = truncnorm.rvs(a, b, loc=0.0, scale=std, size=(output, input))
+        self.weight.data = torch.from_numpy(w_init).float()
 
+        # optional bias
+        # self.bias = nn.Parameter(torch.zeros(output))
+
+        # --- register hooks safely ---
         def hook(self, input, output):
             self.inp = input[0].detach()
             self.out = output.detach()
@@ -48,24 +57,71 @@ class LinearX(nn.Module):
     def forward(self, x):
         return F.linear(x, self.weight, self.bias)
 
-    def lipschitz(self):
-        rand_x = trunc(self.input).type_as(self.weight)
-        for _ in range(self.power_iter):
-            x = l2_normalize(rand_x)
-            x_p = F.linear(x, self.weight) 
-            rand_x = F.linear(x_p, self.weight.T)
+    def lipschitz(self, n_iters: int = None):
+        if n_iters is None:
+            n_iters = max(1, self.power_iter)
 
-        self.lc = torch.sqrt(torch.abs(torch.sum(self.weight @ x)) / (torch.abs(torch.sum(x)) + 1e-9)).data.cpu()
-        del x, x_p
-        torch.cuda.empty_cache()
-        return self.lc
+        W = self.weight
+        device, dtype = W.device, W.dtype
+
+        # Safety check for invalid weights
+        if not torch.isfinite(W).all():
+            print(f"[WARN lipschitz] Non-finite weights detected in {self.__class__.__name__}")
+            self.last_sigma = float("nan")
+            self.lc = self.last_sigma
+            return self.last_sigma
+
+        v = torch.randn(W.size(1), device=device, dtype=dtype)
+        v = l2_normalize(v)
+
+        with torch.no_grad():
+            for _ in range(n_iters):
+                u = W.matmul(v)
+                u = l2_normalize(u)
+                v = W.t().matmul(u)
+                v = l2_normalize(v)
+
+            u = l2_normalize(W.matmul(v))
+            sigma = torch.dot(u, W.matmul(v))
+            sigma_val = sigma.item() if torch.is_tensor(sigma) else float(sigma)
+
+            if not torch.isfinite(torch.tensor(sigma_val)):
+                try:
+                    sigma_val = float(torch.linalg.svdvals(W).max().cpu().item())
+                except Exception:
+                    sigma_val = 1.0
+
+        self.last_sigma = float(sigma_val)
+        self.lc = self.last_sigma
+        print(f"[DEBUG lipschitz] sigma_val={sigma_val:.6f}, weight_norm={torch.linalg.norm(W):.4f}")
+
+        return self.last_sigma
+
+
 
     def apply_spec(self):
-        fc = self.weight.clone().detach()
-        fc = fc * 1 / (max(1, self.lc / self.lmbda))
-        self.weight = nn.Parameter(fc)
-        del fc
-        torch.cuda.empty_cache()
+        """
+        Project weight so that its spectral norm is at most self.lmbda.
+        Uses last_sigma if available; otherwise estimates it.
+        This modifies the existing Parameter in-place to preserve optimizer state.
+        """
+        # ensure we have a sigma estimate
+        sigma = self.last_sigma if (self.last_sigma is not None) else self.lipschitz()
+
+        if sigma is None or sigma == 0:
+            return
+
+        scale = 1.0
+        if sigma > self.lmbda:
+            scale = float(self.lmbda / sigma)
+
+        # multiply weight in-place to preserve the Parameter object
+        with torch.no_grad():
+            self.weight.mul_(scale)
+            # update stored sigma
+            self.last_sigma = float(self.lmbda if sigma > self.lmbda else sigma)
+            self.lc = self.last_sigma
+
 
     def prox(self): 
         self.weight_old = self.weight_t.clone().detach()
@@ -148,6 +204,8 @@ class LinearX(nn.Module):
         self.weight_old = None
         self.proj_weight_old = None
         torch.cuda.empty_cache()
+
+#v =====================================================================================
 
 # torch.manual_seed(0)
 # model = LinearX(32, 32, power_iter=10, lmbda=1, lc_gamma=0.1, lr=1.1, eta=0).cuda()

@@ -13,30 +13,46 @@ from liptrf.models.vit import ViT
 
 from liptrf.utils.evaluate import evaluate_pgd
 
-def train(args, model, device, train_loader,
-          optimizer, epoch, criterion):
+def train(args, model, device, train_loader, optimizer, epoch, criterion):
     model.train()
     train_loss = 0
+    total_jasmin = 0   # Track JaSMin loss
     correct = 0
+
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
+
         output = model(data)
         loss = criterion(output, target)
+
+        # If model has JaSMin regularizer, add it
+        if hasattr(model, "jasmin_loss"):
+            jasmin_val = model.jasmin_loss()   # compute JaSMin
+            loss = loss + args.lmbda * jasmin_val
+            total_jasmin += jasmin_val.item()  # accumulate JaSMin
+
         loss.backward()
-        train_loss += loss.item()
-        pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log_probability
-        correct += pred.eq(target.view_as(pred)).sum().item()
         optimizer.step()
+
+        train_loss += loss.item()
+        pred = output.argmax(dim=1, keepdim=True)
+        correct += pred.eq(target.view_as(pred)).sum().item()
+
         torch.cuda.empty_cache()
 
+    # Averages
     train_loss /= len(train_loader.dataset)
+    avg_jasmin = total_jasmin / len(train_loader.dataset)
     train_samples = len(train_loader.dataset)
 
-    print(f"Epoch: {epoch}, Train set: Average loss: {train_loss:.4f}, " +
-          f"Accuracy: {correct}/{train_samples} " +
-          f"({100.*correct/train_samples:.0f}%), " +
-          f"Error: {(train_samples-correct)/train_samples * 100:.2f}%")
+    print(f"Epoch: {epoch}, Train set: Average loss: {train_loss:.4f}, "
+          f"Accuracy: {correct}/{train_samples} "
+          f"({100.*correct/train_samples:.0f}%), "
+          f"Error: {(train_samples-correct)/train_samples * 100:.2f}%, "
+          f"JaSMin: {avg_jasmin:.4f}")
+
+
 
 
 def test(args, model, device, test_loader, criterion):
@@ -114,11 +130,16 @@ def main():
                         help='data path of MNIST')
     parser.add_argument('--weight_path', type=str, required=True,
                         help='weight path of MNIST')
+    parser.add_argument('--jasmin_lambda', type=float, default=1e-3,
+                    help='Weight of JaSMin regularization term')
+
 
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
-    device = torch.device(args.gpu)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
 
     transform=transforms.Compose([
         transforms.ToTensor(),
@@ -190,6 +211,4 @@ def main():
         model.eval()
         test(args, model, device, test_loader, criterion)
         evaluate_pgd(test_loader, model, epsilon=1.58, niter=100, alpha=1.58/4, device=device)
-
-if __name__ == '__main__':
     main()
