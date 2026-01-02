@@ -74,3 +74,10 @@ env/
 
 # Data
 outputs
+
+# Experiment outputs (CRITICAL for Kaggle)
+runs/
+logs/
+checkpoints/
+results/
+*.csv
