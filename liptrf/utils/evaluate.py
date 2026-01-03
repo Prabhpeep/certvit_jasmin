@@ -6,33 +6,46 @@ from tqdm import tqdm
 
 from advertorch.attacks import L2PGDAttack
 from advertorch.context import ctx_noparamgrad_and_eval
-
+import torchattacks
 
 # TODO: use args not hard code 
 
 def evaluate_pgd(loader, model, epsilon, niter, alpha, device):
     model.eval()
     correct = 0
-    print (epsilon, niter, alpha)
+    print(epsilon, niter, alpha)
 
-    adversary = L2PGDAttack(
-        model, loss_fn=nn.CrossEntropyLoss(reduction="sum"), eps=epsilon, 
-        nb_iter=niter, eps_iter=alpha, rand_init=True, clip_min=0.0, 
-        clip_max=1.0, targeted=False)
+    attack = torchattacks.PGDL2(
+        model,
+        eps=epsilon,
+        alpha=alpha,
+        steps=niter,
+        random_start=True
+    )
 
-    for i, (X,y) in tqdm(enumerate(loader)):
+    for i, (X, y) in tqdm(enumerate(loader)):
         X, y = X.to(device), y.to(device)
-        with ctx_noparamgrad_and_eval(model):
-            X_pgd = adversary.perturb(X, y)
-            
+
+        # --- IMPORTANT: disable parameter grads ---
+        for p in model.parameters():
+            p.requires_grad_(False)
+
+        X_pgd = attack(X, y)
+
+        # --- re-enable parameter grads ---
+        for p in model.parameters():
+            p.requires_grad_(True)
+
         out = model(X_pgd)
         pred = out.argmax(dim=1, keepdim=True)
         correct += pred.eq(y.view_as(pred)).sum().item()
+
         if i * X.shape[0] > 1000:
             break
-    print(f'PGD Accuracy {100.*correct/ (i * X.shape[0]):.2f}')
 
-    return 100.*correct/(i * X.shape[0])
+    acc = 100. * correct / (i * X.shape[0])
+    print(f"PGD Accuracy {acc:.2f}")
+    return acc
 
 
 def vra_sparse(y_true, y_pred):
