@@ -17,20 +17,34 @@ from liptrf.models.layers.linear import LinearX
 def pair(t):
     return t if isinstance(t, tuple) else (t, t)
 # --- JaSMin helper (softmax jacobian norm) ---
-def softmax_jacobian_norm_from_attn(attn):
+import torch
+
+def softmax_jacobian_bound_g1(attn):
     """
-    attn: (..., seq_len, seq_len) softmax outputs (probabilities).
-    Returns per-head/per-batch scalar norm (average across tokens & batch).
-    Uses analytic form sqrt(a_max * (1 - a_max)) per row/head then average.
+    Computes the exact g1 upper bound for the spectral norm of the Softmax Jacobian.
+    Matches the 'Sharp Local Bound' theory.
+    
+    attn: (..., seq_len, seq_len) Softmax probabilities (0 to 1).
+    Returns: scalar loss (mean of the g1 bound).
     """
-    # attn shape: (B, H, N, N) or (..., N, N)
-    # compute max along last dim (the softmax output per query position)
-    a_max, _ = attn.max(dim=-1)                # shape (..., N)
-    a_max = torch.clamp(a_max, 0.0, 1.0)
-    # now a_max in [0,1]; compute sqrt(a_max*(1-a_max)) per token
-    per_token = torch.sqrt(a_max * (1.0 - a_max) + 1e-12)  # stability
-    # average across tokens, heads, batch
-    return per_token.mean()
+    # 1. Get the top 2 probabilities along the last dimension
+    # values shape: (..., seq_len, 2)
+    # x_1 is values[..., 0], x_2 is values[..., 1]
+    top_values, _ = torch.topk(attn, k=2, dim=-1)
+    
+    x_1 = top_values[..., 0]
+    x_2 = top_values[..., 1]
+    
+    # 2. Compute the g1 bound: x_1 * (1 - x_1 + x_2)
+    # This matches the Proposition in your paper exactly.
+    g1 = x_1 * (1.0 - x_1 + x_2)
+    
+    # 3. Aggregation (Strategy 1: Direct Minimization)
+    # We maximize the log to penalize, but since we are minimizing loss, 
+    # we usually just minimize the mean of g1 or max of log(g1).
+    # Simple mean reduction is stable and effective:
+    return g1.mean()
+
 
 
 class PreNorm(nn.Module):
