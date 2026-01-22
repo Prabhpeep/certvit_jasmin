@@ -120,7 +120,7 @@ def train(args, model, device, train_loader,
         loss = criterion(output, target)
 
         # --- Safely add JaSMin only when its weight (lmbda) != 0 ---
-        if args.jasmin_lmbda != 0 and hasattr(model, "jasmin_loss"):
+        if args.jasmin_lambda != 0 and hasattr(model, "jasmin_loss"):
             try:
                 jasmin_val = model.jasmin_loss()
                 # convert to tensor if necessary
@@ -136,7 +136,7 @@ def train(args, model, device, train_loader,
                 print(f"[WARN] jasmin_loss() raised exception: {e}; skipping JaSMin term for this batch.")
                 jasmin_val = torch.tensor(0.0, device=loss.device, dtype=loss.dtype)
 
-            loss = loss + args.jasmin_lmbda * jasmin_val
+            loss = loss + args.jasmin_lambda * jasmin_val
             # accumulate as float safely
             try:
                 # logging only: use detached STRICT max
