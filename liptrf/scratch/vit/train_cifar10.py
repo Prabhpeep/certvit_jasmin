@@ -28,11 +28,11 @@ from liptrf.utils.evaluate import evaluate_pgd
 #         optimizer.zero_grad()
 #         output = model(data)
 #         loss = criterion(output, target)
-#                 # If model has JaSMin regularizer, add it
-#         if hasattr(model, "jasmin_loss"):
-#             jasmin_val = model.jasmin_loss()   # compute JaSMin
-#             loss = loss + args.lmbda * jasmin_val
-#             total_jasmin += jasmin_val.item()  # accumulate JaSMin
+#                 # If model has  regularizer, add it
+#         if hasattr(model, "_loss"):
+#             _val = model._loss()   # compute 
+#             loss = loss + args.lmbda * _val
+#             total_ += _val.item()  # accumulate 
 
     
 #         loss.backward()
@@ -51,14 +51,14 @@ from liptrf.utils.evaluate import evaluate_pgd
 #     train_samples = len(train_loader.dataset)
 #         # Averages
     
-#     avg_jasmin = total_jasmin / len(train_loader.dataset)
+#     avg_ = total_ / len(train_loader.dataset)
     
 
 #     print(f"Epoch: {epoch}, Train set: Average loss: {train_loss:.4f}, "
 #           f"Accuracy: {correct}/{train_samples} "
 #           f"({100.*correct/train_samples:.0f}%), "
 #           f"Error: {(train_samples-correct)/train_samples * 100:.2f}%, "
-#           f"JaSMin: {avg_jasmin:.4f}")
+#           f": {avg_:.4f}")
 
 # def test(args, model, device, test_loader, criterion):
 #     model.eval()
@@ -105,7 +105,9 @@ def train(args, model, device, train_loader,
     model.train()
     train_loss = 0.0
     correct = 0
-    total_jasmin = 0.0
+    total_ = 0.0
+    epoch_jasmin_max = -float("inf")
+
 
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
@@ -114,7 +116,7 @@ def train(args, model, device, train_loader,
         loss = criterion(output, target)
 
         # --- Safely add JaSMin only when its weight (lmbda) != 0 ---
-        if args.lmbda != 0 and hasattr(model, "jasmin_loss"):
+        if args.jasmin_lmbda != 0 and hasattr(model, "jasmin_loss"):
             try:
                 jasmin_val = model.jasmin_loss()
                 # convert to tensor if necessary
@@ -130,10 +132,14 @@ def train(args, model, device, train_loader,
                 print(f"[WARN] jasmin_loss() raised exception: {e}; skipping JaSMin term for this batch.")
                 jasmin_val = torch.tensor(0.0, device=loss.device, dtype=loss.dtype)
 
-            loss = loss + args.lmbda * jasmin_val
+            loss = loss + args.jasmin_lmbda * jasmin_val
             # accumulate as float safely
             try:
-                total_jasmin += float(jasmin_val.detach().cpu().item())
+                # logging only: use detached STRICT max
+                if hasattr(model, "jasmin_loss_logged"):
+                    batch_jasmin = model.jasmin_loss_logged()
+                    epoch_jasmin_max = max(epoch_jasmin_max, batch_jasmin)
+
             except Exception:
                 # fallback: ignore accumulation if something odd happens
                 pass
@@ -173,13 +179,17 @@ def train(args, model, device, train_loader,
     # compute averages over dataset size (keep previous behaviour)
     train_loss /= len(train_loader.dataset)
     train_samples = len(train_loader.dataset)
-    avg_jasmin = total_jasmin / len(train_loader.dataset)
+    if epoch_jasmin_max == -float("inf"):
+        epoch_jasmin_max = 0.0
 
-    print(f"Epoch: {epoch}, Train set: Average loss: {train_loss:.4f}, "
-          f"Accuracy: {correct}/{train_samples} "
-          f"({100.*correct/train_samples:.0f}%), "
-          f"Error: {(train_samples-correct)/train_samples * 100:.2f}%, "
-          f"JaSMin: {avg_jasmin:.4f}")
+    print(
+    f"Epoch: {epoch}, Train set: Average loss: {train_loss:.4f}, "
+    f"Accuracy: {correct}/{train_samples} "
+    f"({100.*correct/train_samples:.0f}%), "
+    f"Error: {(train_samples-correct)/train_samples * 100:.2f}%, "
+    f"JaSMin(max): {epoch_jasmin_max:.4f}"
+)
+
 
 
 def test(args, model, device, test_loader, criterion):
