@@ -19,31 +19,32 @@ def pair(t):
 # --- JaSMin helper (softmax jacobian norm) ---
 import torch
 
-def softmax_jacobian_bound_g1(attn):
+def softmax_jacobian_bound_g1(attn, eps=1e-12):
     """
-    Computes the exact g1 upper bound for the spectral norm of the Softmax Jacobian.
-    Matches the 'Sharp Local Bound' theory.
-    
-    attn: (..., seq_len, seq_len) Softmax probabilities (0 to 1).
-    Returns: scalar loss (mean of the g1 bound).
+    attn: Tensor of shape (B, H, N, N)
+          Softmax attention probabilities.
+    Returns:
+        Scalar JaSMin loss: max-token log g1, averaged over batch & heads.
     """
-    # 1. Get the top 2 probabilities along the last dimension
-    # values shape: (..., seq_len, 2)
-    # x_1 is values[..., 0], x_2 is values[..., 1]
-    top_values, _ = torch.topk(attn, k=2, dim=-1)
-    
-    x_1 = top_values[..., 0]
-    x_2 = top_values[..., 1]
-    
-    # 2. Compute the g1 bound: x_1 * (1 - x_1 + x_2)
-    # This matches the Proposition in your paper exactly.
-    g1 = x_1 * (1.0 - x_1 + x_2)
-    
-    # 3. Aggregation (Strategy 1: Direct Minimization)
-    # We maximize the log to penalize, but since we are minimizing loss, 
-    # we usually just minimize the mean of g1 or max of log(g1).
-    # Simple mean reduction is stable and effective:
-    return g1.mean()
+
+    # sort probabilities along last dimension (descending)
+    # gives x_(1), x_(2)
+    top2, _ = torch.topk(attn, k=2, dim=-1)   # shape (B, H, N, 2)
+    x1 = top2[..., 0]
+    x2 = top2[..., 1]
+
+    # g1(p) = x1 * (1 - x1 + x2)
+    g1 = x1 * (1.0 - x1 + x2)
+
+    # numerical stability
+    g1 = torch.clamp(g1, min=eps)
+
+    # max over tokens (worst-case token per head)
+    per_head = torch.max(torch.log(g1), dim=-1).values  # (B, H)
+
+    # average over batch and heads
+    return per_head.mean()
+
 
 
 
