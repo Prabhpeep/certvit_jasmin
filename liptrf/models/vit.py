@@ -19,7 +19,7 @@ def pair(t):
 # --- JaSMin helper (softmax jacobian norm) ---
 import torch
 
-def softmax_jacobian_bound_g1(attn, eps=1e-12):
+def softmax_jacobian_norm_from_attn(attn, eps=1e-12):
     """
     attn: Tensor of shape (B, H, N, N)
           Softmax attention probabilities.
@@ -385,6 +385,21 @@ class ViT(nn.Module):
             if hasattr(module, 'last_jasmin'):
                 loss += module.last_jasmin
         return loss
+
+
+    def jasmin_loss_logged(self):
+        vals = []
+        for module in self.modules():
+            if hasattr(module, "last_jasmin_logged"):
+                vals.append(module.last_jasmin_logged)
+    
+        if len(vals) == 0:
+            return 0.0
+    
+        # IMPORTANT: JaSMin values are log(g1) ≤ 0
+        # For readability, we log the NEGATIVE (higher = worse)
+        return (-torch.stack(vals).max()).item()
+
 
 
     def lipschitz(self):
