@@ -158,7 +158,7 @@ class L2Attention(nn.Module):
         #new code
         logits = -1 * (q_l2 - 2 * dots + k_l2) * self.scale
         logits = logits - logits.max(dim=-1, keepdim=True).values   # <-- subtract max per row for stability
-        attn = logits.softmax(dim=-1)
+        attn = (0.5 * logits).softmax(dim=-1)
         attn = self.dropout(attn)
 
         attn = self.dropout(attn)
@@ -233,7 +233,7 @@ class Attention(nn.Module):
 
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
 
-        attn = self.attend(dots)
+        attn = torch.softmax(0.5 * dots, dim=-1)
         attn = self.dropout(attn)
 
         # JaSMin regularizer
