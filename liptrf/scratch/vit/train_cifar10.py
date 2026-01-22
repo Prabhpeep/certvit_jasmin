@@ -102,6 +102,10 @@ from liptrf.utils.evaluate import evaluate_pgd
 
 def train(args, model, device, train_loader,
           optimizer, epoch, criterion, finetune=False):
+
+   
+    print(">>> TRAIN FUNCTION VERSION: JASMIN-MAX <<<")
+
     model.train()
     train_loss = 0.0
     correct = 0
