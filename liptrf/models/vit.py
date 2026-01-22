@@ -42,7 +42,7 @@ def softmax_jacobian_norm_from_attn(attn, eps=1e-12):
     # max over tokens (worst-case token per head)
     per_head = torch.max(torch.log(g1), dim=-1).values  # (B, H)
 
-    print("DEBUG g1 max:", g1.max().item(), "min:", g1.min().item())
+    
 
 
     # average over batch and heads
